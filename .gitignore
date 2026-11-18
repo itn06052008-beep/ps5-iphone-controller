@@ -1,0 +1,6 @@
+ios/build/
+ios/*.xcodeproj/
+ios/PS5Pad/Info.plist
+ios/Payload/
+*.ipa
+__pycache__/

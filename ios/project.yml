@@ -1,0 +1,34 @@
+name: PS5Pad
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  PS5Pad:
+    type: application
+    platform: iOS
+    sources:
+      - PS5Pad
+    info:
+      path: PS5Pad/Info.plist
+      properties:
+        CFBundleDisplayName: PS5 Pad
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - bluetooth-peripheral
+        NSBluetoothAlwaysUsageDescription: "Ứng dụng dùng Bluetooth để gửi tín hiệu tay cầm tới máy tính."
+        NSBluetoothPeripheralUsageDescription: "Ứng dụng dùng Bluetooth để gửi tín hiệu tay cầm tới máy tính."
+        NSLocalNetworkUsageDescription: "Ứng dụng nhận kết nối từ máy tính qua cáp USB hoặc Wi-Fi."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ps5pad
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
