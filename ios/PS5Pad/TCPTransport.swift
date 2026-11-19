@@ -20,6 +20,7 @@ final class TCPTransport {
     func start() {
         guard listener == nil else { return }
         let params = NWParameters.tcp
+        params.serviceClass = .responsiveData
         if let tcp = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcp.noDelay = true
         }

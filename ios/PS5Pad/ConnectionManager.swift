@@ -8,7 +8,7 @@ final class ConnectionManager: ObservableObject {
         var id: String { rawValue }
     }
 
-    @Published var mode: Mode = .bluetooth {
+    @Published var mode: Mode = .cable {
         didSet { if oldValue != mode { restart() } }
     }
     @Published private(set) var status = "Đang khởi tạo…"
@@ -87,12 +87,14 @@ final class ConnectionManager: ObservableObject {
         }
         if b == .l2 { state.l2 = down ? 1 : 0 }
         if b == .r2 { state.r2 = down ? 1 : 0 }
+        tick()
     }
 
     func setStick(left: Bool, x: Float, y: Float) {
         // small radial dead zone
         let mag = (x * x + y * y).squareRoot()
-        let (fx, fy): (Float, Float) = mag < 0.08 ? (0, 0) : (x, y)
+        let (fx, fy): (Float, Float) = mag < 0.04 ? (0, 0) : (x, y)
         if left { state.lx = fx; state.ly = fy } else { state.rx = fx; state.ry = fy }
+        tick()
     }
 }
