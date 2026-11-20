@@ -60,6 +60,16 @@ final class ConnectionManager: ObservableObject {
         }
     }
 
+    func refreshIfNeeded() {
+        switch mode {
+        case .bluetooth:
+            ble.start()
+        case .cable:
+            tcp.start()
+            ipAddress = TCPTransport.localIPAddress()
+        }
+    }
+
     /// Send on change, plus a 10 Hz keep-alive.
     private func tick() {
         let packet = state.packet(seq: 0)

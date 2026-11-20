@@ -177,6 +177,29 @@ async def discover_iphone_ip(preferred_ip: str = "", port: int = companion.PORT)
     return None
 
 
+async def connect_wifi_direct_or_scan(
+    preferred_ip: str = "", port: int = companion.PORT, fail_streak: int = 0
+) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter] | None:
+    """Try preferred_ip directly and reuse the open socket; scan /24 only after 3 failures."""
+    preferred = preferred_ip.strip()
+    if preferred:
+        try:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(preferred, port), timeout=1.5)
+            return preferred, reader, writer
+        except Exception:
+            if fail_streak < 3:
+                return None
+
+    found = await discover_iphone_ip("", port)
+    if not found:
+        return None
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(found, port), timeout=2.0)
+        return found, reader, writer
+    except Exception:
+        return None
+
+
 def _start_silent_usb_forward() -> subprocess.Popen | None:
     if shutil.which("iproxy"):
         cmd = ["iproxy", str(companion.PORT), str(companion.PORT)]
@@ -218,6 +241,11 @@ class ControllerBackend:
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
+        try:
+            if self._gamepad_cache is None:
+                self._gamepad_cache = companion.VirtualPad()
+        except Exception:
+            pass
         self._ready.set()
         try:
             self._loop.run_forever()
@@ -319,6 +347,7 @@ class ControllerBackend:
                 has_usbmux = True
             except ImportError:
                 has_usbmux = False
+        wifi_fail_streak = 0
         try:
             if transport == "usb" and not has_usbmux:
                 self._on_status("Đang mở kết nối cáp USB…", "searching")
@@ -336,32 +365,35 @@ class ControllerBackend:
                     if has_usbmux:
                         stream = await companion.open_direct_usb_stream(companion.PORT)
                         if stream is None:
-                            await asyncio.sleep(0.8)
+                            await asyncio.sleep(0.5)
                             continue
                         reader, writer = stream
+                    else:
+                        try:
+                            reader, writer = await asyncio.wait_for(
+                                asyncio.open_connection(host, companion.PORT), timeout=2.0
+                            )
+                        except Exception:
+                            await asyncio.sleep(0.8)
+                            continue
                 else:
-                    self._on_status("Đang tìm iPhone trong mạng Wi-Fi…", "searching")
-                    found = await discover_iphone_ip(current_ip, companion.PORT)
-                    if not found:
+                    self._on_status(
+                        f"Đang kết nối Wi-Fi ({current_ip})…" if current_ip and wifi_fail_streak < 3
+                        else "Đang tìm iPhone trong mạng Wi-Fi…",
+                        "searching",
+                    )
+                    res = await connect_wifi_direct_or_scan(current_ip, companion.PORT, wifi_fail_streak)
+                    if res is None:
+                        wifi_fail_streak += 1
                         self._on_status("Chưa thấy iPhone (mở app, chọn 'Cáp USB / Wi-Fi')", "searching")
-                        await asyncio.sleep(1.2)
+                        await asyncio.sleep(0.6)
                         continue
-                    current_ip = found
-                    host = found
-                    self._on_ip_found(found)
+                    host, reader, writer = res
+                    wifi_fail_streak = 0
+                    current_ip = host
+                    self._on_ip_found(host)
 
-                if writer is None:
-                    try:
-                        reader, writer = await asyncio.wait_for(
-                            asyncio.open_connection(host, companion.PORT), timeout=3.0
-                        )
-                    except Exception:
-                        await asyncio.sleep(1.0)
-                        continue
-
-                sock = writer.get_extra_info("socket")
-                if sock is not None:
-                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                companion.configure_tcp_socket(writer.get_extra_info("socket"))
 
                 async def sink(data: bytes, w=writer) -> None:
                     w.write(data)
@@ -381,7 +413,7 @@ class ControllerBackend:
                 buf = bytearray()
                 try:
                     while True:
-                        chunk = await reader.read(4096)
+                        chunk = await asyncio.wait_for(reader.read(4096), timeout=1.5)
                         if not chunk:
                             raise ConnectionResetError("EOF")
                         buf.extend(chunk)
@@ -392,8 +424,8 @@ class ControllerBackend:
                             self._on_pps(round(pkt_count / (now - t_rate)))
                             pkt_count = 0
                             t_rate = now
-                except (asyncio.IncompleteReadError, ConnectionError, OSError):
-                    self._on_status("Mất kết nối, đang tìm lại iPhone…", "searching")
+                except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
+                    self._on_status("Mất kết nối, đang kết nối lại…", "searching")
                 finally:
                     self._rumble_sink = None
                     if self._mapper is not None:
@@ -404,7 +436,7 @@ class ControllerBackend:
                         writer.close()
                     except Exception:
                         pass
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.3)
         except asyncio.CancelledError:
             raise
         finally:
@@ -577,6 +609,7 @@ class PS5PadApp:
 
 
 def main() -> None:
+    companion.ensure_single_instance()
     companion.enable_low_latency_mode()
     root = tk.Tk()
     PS5PadApp(root)

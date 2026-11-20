@@ -20,6 +20,8 @@ import atexit
 import ctypes
 from ctypes import wintypes
 import math
+import os
+from pathlib import Path
 import shutil
 import socket
 import struct
@@ -533,6 +535,99 @@ def drain_packets(buf: bytearray, mapper) -> int:
     return len(packets)
 
 
+PID_FILE = Path(__file__).resolve().parent / "instance.pid"
+
+
+def _is_controller_process(pid: int) -> bool:
+    try:
+        import psutil
+        p = psutil.Process(pid)
+        if "python" not in p.name().lower():
+            return False
+        return any(Path(arg).name in ("gui.py", "companion.py") for arg in p.cmdline())
+    except Exception:
+        return False
+
+
+def _stop_pid(pid: int) -> None:
+    try:
+        import psutil
+        p = psutil.Process(pid)
+        p.terminate()
+        try:
+            p.wait(timeout=1.5)
+        except psutil.TimeoutExpired:
+            p.kill()
+            p.wait(timeout=1.0)
+    except Exception:
+        pass
+
+
+def ensure_single_instance() -> None:
+    """Stop any older gui.py / companion.py instance so only one client talks to the iPhone."""
+    my_pid = os.getpid()
+    killed: set[int] = set()
+
+    if PID_FILE.exists():
+        try:
+            old_pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+            if old_pid != my_pid and _is_controller_process(old_pid):
+                _stop_pid(old_pid)
+                killed.add(old_pid)
+        except Exception:
+            pass
+
+    try:
+        import psutil
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            pid = proc.info.get("pid")
+            if not pid or pid == my_pid or pid in killed:
+                continue
+            name = (proc.info.get("name") or "").lower()
+            if "python" not in name:
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if any(Path(arg).name in ("gui.py", "companion.py") for arg in cmdline):
+                _stop_pid(pid)
+                killed.add(pid)
+    except Exception:
+        pass
+
+    try:
+        PID_FILE.write_text(str(my_pid), encoding="utf-8")
+    except Exception:
+        pass
+
+    def _remove_pid() -> None:
+        try:
+            if PID_FILE.exists() and PID_FILE.read_text(encoding="utf-8").strip() == str(my_pid):
+                PID_FILE.unlink()
+        except Exception:
+            pass
+
+    atexit.register(_remove_pid)
+
+
+def configure_tcp_socket(sock: socket.socket | None) -> None:
+    """Enable TCP_NODELAY and aggressive Windows keep-alive probes for dead Wi-Fi sockets."""
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except (OSError, AttributeError):
+        pass
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except (OSError, AttributeError):
+        pass
+    raw = getattr(sock, "_sock", sock)
+    if hasattr(raw, "ioctl") and hasattr(socket, "SIO_KEEPALIVE_VALS"):
+        try:
+            raw.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 1000, 500))
+        except (OSError, AttributeError):
+            pass
+
+
 async def open_direct_usb_stream(port: int = PORT):
     """Connect directly to iPhone via usbmuxd without a proxy subprocess hop."""
     try:
@@ -544,7 +639,7 @@ async def open_direct_usb_stream(port: int = PORT):
     except Exception:
         return None
     try:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        configure_tcp_socket(sock)
         sock.setblocking(False)
         return await asyncio.open_connection(sock=sock)
     except Exception:
@@ -568,15 +663,13 @@ async def run_tcp(vpad: VirtualPad, host: str, direct_usb: bool = False) -> None
                 continue
         else:
             try:
-                reader, writer = await asyncio.open_connection(host, PORT)
-            except OSError:
+                reader, writer = await asyncio.wait_for(asyncio.open_connection(host, PORT), timeout=2.0)
+            except (OSError, asyncio.TimeoutError):
                 print(f"… chưa kết nối được {host}:{PORT}, thử lại (mở app, chọn 'Cáp USB / Wi-Fi')")
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)
                 continue
 
-        sock = writer.get_extra_info("socket")
-        if sock is not None:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        configure_tcp_socket(writer.get_extra_info("socket"))
 
         async def sink(data: bytes) -> None:
             writer.write(data)
@@ -588,18 +681,21 @@ async def run_tcp(vpad: VirtualPad, host: str, direct_usb: bool = False) -> None
         buf = bytearray()
         try:
             while True:
-                chunk = await reader.read(4096)
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=1.5)
                 if not chunk:
                     raise ConnectionResetError("EOF")
                 buf.extend(chunk)
                 drain_packets(buf, vpad)
-        except (asyncio.IncompleteReadError, ConnectionError, OSError):
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
             print("✖ Mất kết nối, đang thử lại…")
         finally:
             vpad.rumble_sink = None
             vpad.neutral()
-            writer.close()
-        await asyncio.sleep(0.8)
+            try:
+                writer.close()
+            except Exception:
+                pass
+        await asyncio.sleep(0.3)
 
 
 def start_usb_forward() -> subprocess.Popen | None:
@@ -664,6 +760,7 @@ async def main() -> None:
     grp.add_argument("--lol-wasd", action="store_true", help="Chế độ chơi LMHT Keyboard (WASD) chính thức")
     args = ap.parse_args()
 
+    ensure_single_instance()
     enable_low_latency_mode()
 
     if args.lol_wasd:

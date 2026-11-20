@@ -23,6 +23,10 @@ final class TCPTransport {
         params.serviceClass = .responsiveData
         if let tcp = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcp.noDelay = true
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 1
+            tcp.keepaliveInterval = 1
+            tcp.keepaliveCount = 2
         }
         params.allowLocalEndpointReuse = true
         do {
@@ -31,7 +35,10 @@ final class TCPTransport {
             l.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready: self?.onStatus?("Đang chờ máy tính (cổng \(Self.port))…", false)
-                case .failed(let e): self?.onStatus?("Lỗi TCP: \(e.localizedDescription)", false)
+                case .failed(let e):
+                    self?.listener?.cancel()
+                    self?.listener = nil
+                    self?.onStatus?("Lỗi TCP: \(e.localizedDescription)", false)
                 default: break
                 }
             }
@@ -51,7 +58,11 @@ final class TCPTransport {
 
     func send(_ data: Data) {
         guard let c = connection, c.state == .ready else { return }
-        c.send(content: data, completion: .contentProcessed { _ in })
+        c.send(content: data, completion: .contentProcessed { [weak self, weak c] error in
+            if error != nil, let c, self?.connection === c {
+                c.cancel()
+            }
+        })
     }
 
     private func accept(_ c: NWConnection) {
